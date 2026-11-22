@@ -111,6 +111,6 @@ if otool -L "$STAGE/ffmpeg" | tail -n +2 | grep -vE '^\s+(/usr/lib/|/System/Libr
   echo "unexpected non-system dynamic dependency" >&2; exit 1
 fi
 
-tar -C "$WORK" -cJf "$OUT/$NAME.tar.xz" "$NAME"
+COPYFILE_DISABLE=1 tar --no-xattrs -C "$WORK" -cJf "$OUT/$NAME.tar.xz" "$NAME"
 ( cd "$OUT" && shasum -a 256 "$NAME.tar.xz" > "$NAME.tar.xz.sha256" )
 cat "$OUT/$NAME.tar.xz.sha256"
