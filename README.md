@@ -42,7 +42,7 @@ Clipforge also bundles [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (M
 
 | Platform | Build | GPU | Notes |
 | --- | --- | --- | --- |
-| Windows x64 | clang + Ninja, shared libraries | Vulkan (NVIDIA, Intel, AMD), loaded at runtime | Falls back to the CPU when the driver has no Vulkan loader. CPU variants (SSE4.2 to AVX-512) are picked at runtime. A UTF-8 code page manifest makes non-ASCII paths work. |
+| Windows x64 | clang + Ninja, shared libraries | Vulkan (NVIDIA, Intel, AMD), loaded at runtime | Falls back to the CPU when the driver has no Vulkan loader. CPU variants (SSE4.2 to AVX-512) are picked at runtime. A UTF-8 code page manifest, plus a one-line patch (`codecvt_utf8_utf16` for the model path), makes non-ASCII paths work, emoji included. |
 | macOS arm64 | static, macOS 13.0+ | Metal, library embedded | One `whisper-cli` binary that links only system libraries |
 
 Each job smoke-tests the result by transcribing the JFK sample from a non-ASCII folder. To publish, run the workflow from the Actions tab with **release** ticked. It creates `whisper-v<version>-<revision>`. Then update `resources/whisper/manifest.json` in Clipforge.

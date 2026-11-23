@@ -49,6 +49,17 @@ jobs:
           tar xzf src.tar.gz
           "SRC=$PWD\whisper.cpp-$env:WHISPER_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: Patch model paths for characters outside the BMP
+        # whisper.cpp widens the model path with codecvt_utf8<wchar_t>, which is UCS-2 on Windows,
+        # so a path containing an emoji (U+1F3AC) fails to open. codecvt_utf8_utf16 produces
+        # surrogate pairs. Two sites: the whisper model and the VAD model.
+        run: |
+          $f = "$env:SRC\src\whisper.cpp"
+          $s = Get-Content $f -Raw
+          $n = ([regex]::Matches($s, [regex]::Escape('std::codecvt_utf8<wchar_t>'))).Count
+          if ($n -ne 2) { throw "expected 2 codecvt_utf8<wchar_t> sites, found $n" }
+          $s.Replace('std::codecvt_utf8<wchar_t>', 'std::codecvt_utf8_utf16<wchar_t>') | Set-Content $f -NoNewline -Encoding utf8
+
       - name: Install Vulkan SDK (build-time only)
         run: |
           $v = $env:VULKAN_SDK_VERSION
@@ -88,7 +99,7 @@ jobs:
             "Clipforge build of whisper.cpp v$env:WHISPER_VERSION (MIT), windows-x64"
             "Source: https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v$env:WHISPER_VERSION.tar.gz sha256=$env:WHISPER_SHA256"
             "Toolchain: clang (x64-windows-llvm.cmake) + Ninja; Vulkan SDK $env:VULKAN_SDK_VERSION at build time only"
-            "Options: BUILD_SHARED_LIBS GGML_BACKEND_DL GGML_CPU_ALL_VARIANTS GGML_VULKAN; UTF-8 active code page manifest"
+            "Options: BUILD_SHARED_LIBS GGML_BACKEND_DL GGML_CPU_ALL_VARIANTS GGML_VULKAN; UTF-8 active code page manifest; patch: codecvt_utf8_utf16 for model paths (emoji)"
             "Workflow: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
             "Files: whisper-cli.exe, $dlls"
           ) | Set-Content "$name\BUILDINFO.txt" -Encoding utf8
