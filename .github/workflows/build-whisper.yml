@@ -188,8 +188,13 @@ jobs:
           curl -fsSL -o tiny.bin "$TINY_URL"
           echo "$TINY_SHA256  tiny.bin" | shasum -a 256 -c -
           DIR="$RUNNER_TEMP/smoke ශ්‍රී 🎬"; mkdir -p "$DIR"; cp tiny.bin "$SRC/samples/jfk.wav" "$DIR/"
-          "$NAME/whisper-cli" -m "$DIR/tiny.bin" -f "$DIR/jfk.wav" -ojf -of "$DIR/out" 2> stderr.txt || { cat stderr.txt; exit 1; }
-          grep -E "whisper_backend_init|ggml_metal|GPU name|system_info" stderr.txt | head -20 || true
+          # Run twice: the second run shows whether macOS caches the Metal shaders compiled on first use.
+          for run in 1 2; do
+            start=$(date +%s)
+            "$NAME/whisper-cli" -m "$DIR/tiny.bin" -f "$DIR/jfk.wav" -ojf -of "$DIR/out" 2> stderr.txt || { cat stderr.txt; exit 1; }
+            echo "run $run: $(( $(date +%s) - start )) s"
+          done
+          grep -vE "compiled '" stderr.txt | grep -E "whisper_backend_init|ggml_metal|GPU name|system_info" || true
           python3 -c 'import json,sys; t=" ".join(s["text"] for s in json.load(open(sys.argv[1]))["transcription"]); print("transcript:", t); assert "ask not what your country can do for you" in t' "$DIR/out.json"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
