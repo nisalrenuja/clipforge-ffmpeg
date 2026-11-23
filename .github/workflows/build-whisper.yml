@@ -1,0 +1,205 @@
+# Builds the whisper.cpp speech-to-text binaries bundled with Clipforge (add-analysis, design D2).
+#   Windows x64: clang + Ninja, Vulkan backend as a DLL loaded at runtime (falls back to the CPU when
+#                the GPU driver has no Vulkan loader), CPU variants picked at runtime, UTF-8 manifest.
+#   macOS arm64: one static whisper-cli with an embedded Metal library, macOS 13.0+.
+# Each job smoke-tests the result by transcribing upstream's JFK sample with the tiny model.
+# Run it from the Actions tab; tick "release" to publish the archives to whisper-v<ver>-<rev>.
+name: build-whisper
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Publish the archives as a GitHub release
+        type: boolean
+        default: false
+      revision:
+        description: Release revision suffix (whisper-v<ver>-<revision>)
+        default: "1"
+  pull_request:
+    paths: [".github/workflows/build-whisper.yml", "whisper/**", "versions.env"]
+
+permissions:
+  contents: read
+
+env:
+  # Smoke-test model (not shipped): ggml-tiny.en from ggerganov/whisper.cpp, pinned by commit + SHA-256.
+  TINY_URL: https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.en.bin
+  TINY_SHA256: 921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read pins
+        run: |
+          Get-Content versions.env | Where-Object { $_ -match '^[A-Z0-9_]+=' } | ForEach-Object { $_ } |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Fetch and verify whisper.cpp source
+        run: |
+          Invoke-WebRequest "https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v$env:WHISPER_VERSION.tar.gz" -OutFile src.tar.gz
+          $got = (Get-FileHash src.tar.gz -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $env:WHISPER_SHA256) { throw "whisper.cpp source SHA-256 mismatch: $got" }
+          tar xzf src.tar.gz
+          "SRC=$PWD\whisper.cpp-$env:WHISPER_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install Vulkan SDK (build-time only)
+        run: |
+          $v = $env:VULKAN_SDK_VERSION
+          Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/$v/windows/vulkansdk-windows-X64-$v.exe" -OutFile vksdk.exe
+          Start-Process -Wait -FilePath .\vksdk.exe -ArgumentList '--root','C:\VulkanSDK','--accept-licenses','--default-answer','--confirm-command','install'
+          "VULKAN_SDK=C:\VulkanSDK" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "C:\VulkanSDK\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Build (clang + Ninja, MSVC environment)
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          pip install ninja==1.13.0 || exit /b 1
+          cmake -S "%SRC%" -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_TOOLCHAIN_FILE="%SRC%\cmake\x64-windows-llvm.cmake" ^
+            -DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DGGML_NATIVE=OFF ^
+            -DGGML_VULKAN=ON -DGGML_OPENMP=OFF ^
+            -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF -DWHISPER_SDL2=OFF -DWHISPER_CURL=OFF || exit /b 1
+          cmake --build build --target whisper-cli -j 4 || exit /b 1
+
+      - name: Embed UTF-8 manifest and check it
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          mt.exe -nologo -manifest whisper\utf8.manifest -outputresource:build\bin\whisper-cli.exe;#1 || exit /b 1
+          mt.exe -nologo -inputresource:build\bin\whisper-cli.exe;#1 -out:check.manifest || exit /b 1
+          findstr /C:"<activeCodePage" check.manifest || exit /b 1
+
+      - name: Package
+        run: |
+          $name = "whisper-$env:WHISPER_VERSION-windows-x64"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item build\bin\whisper-cli.exe, build\bin\*.dll $name
+          Copy-Item "$env:SRC\LICENSE" "$name\LICENSE-whisper.cpp.txt"
+          $dlls = (Get-ChildItem $name -Filter *.dll | ForEach-Object Name) -join ', '
+          @(
+            "Clipforge build of whisper.cpp v$env:WHISPER_VERSION (MIT), windows-x64"
+            "Source: https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v$env:WHISPER_VERSION.tar.gz sha256=$env:WHISPER_SHA256"
+            "Toolchain: clang (x64-windows-llvm.cmake) + Ninja; Vulkan SDK $env:VULKAN_SDK_VERSION at build time only"
+            "Options: BUILD_SHARED_LIBS GGML_BACKEND_DL GGML_CPU_ALL_VARIANTS GGML_VULKAN; UTF-8 active code page manifest"
+            "Workflow: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            "Files: whisper-cli.exe, $dlls"
+          ) | Set-Content "$name\BUILDINFO.txt" -Encoding utf8
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          $h = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$h  $name.zip" | Set-Content "$name.zip.sha256" -Encoding ascii -NoNewline
+          Get-ChildItem $name | Format-Table Name, Length
+          "NAME=$name" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Smoke test (CPU fallback; the runner has no GPU)
+        run: |
+          Invoke-WebRequest $env:TINY_URL -OutFile tiny.bin
+          if ((Get-FileHash tiny.bin -Algorithm SHA256).Hash.ToLower() -ne $env:TINY_SHA256) { throw "tiny model SHA-256 mismatch" }
+          # Run from a non-ASCII folder to exercise the UTF-8 manifest.
+          $dir = Join-Path $env:RUNNER_TEMP "smoke ශ්‍රී 🎬"; New-Item -ItemType Directory $dir | Out-Null
+          Copy-Item tiny.bin, "$env:SRC\samples\jfk.wav" $dir
+          & "$env:NAME\whisper-cli.exe" -m "$dir\tiny.bin" -f "$dir\jfk.wav" -ojf -of "$dir\out" -np
+          if ($LASTEXITCODE -ne 0) { throw "whisper-cli exited $LASTEXITCODE" }
+          $text = (Get-Content "$dir\out.json" -Raw -Encoding utf8 | ConvertFrom-Json).transcription.text -join ' '
+          "transcript: $text"
+          if ($text -notmatch 'ask not what your country can do for you') { throw "unexpected transcript" }
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: whisper-windows-x64
+          path: |
+            ${{ env.NAME }}.zip
+            ${{ env.NAME }}.zip.sha256
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read pins
+        run: grep -E '^[A-Z0-9_]+=' versions.env >> "$GITHUB_ENV"
+
+      - name: Fetch and verify whisper.cpp source
+        run: |
+          curl -fsSL -o src.tar.gz "https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v$WHISPER_VERSION.tar.gz"
+          echo "$WHISPER_SHA256  src.tar.gz" | shasum -a 256 -c -
+          tar xzf src.tar.gz
+          echo "SRC=$PWD/whisper.cpp-$WHISPER_VERSION" >> "$GITHUB_ENV"
+
+      - name: Build (static, Metal embedded)
+        run: |
+          cmake -S "$SRC" -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_MIN" \
+            -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DGGML_NATIVE=OFF \
+            -DGGML_OPENMP=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF -DWHISPER_SDL2=OFF -DWHISPER_CURL=OFF
+          cmake --build build --target whisper-cli -j 4
+
+      - name: Check linkage and deployment target
+        run: |
+          otool -L build/bin/whisper-cli
+          if otool -L build/bin/whisper-cli | tail -n +2 | grep -vE '^\s+(/System/Library/|/usr/lib/)'; then
+            echo "links a non-system dynamic library" >&2; exit 1
+          fi
+          vtool -show-build build/bin/whisper-cli | grep -E "minos $MACOS_MIN"
+
+      - name: Package
+        run: |
+          NAME="whisper-$WHISPER_VERSION-macos-arm64"
+          mkdir "$NAME"
+          cp build/bin/whisper-cli "$NAME/"
+          cp "$SRC/LICENSE" "$NAME/LICENSE-whisper.cpp.txt"
+          {
+            echo "Clipforge build of whisper.cpp v$WHISPER_VERSION (MIT), macos-arm64"
+            echo "Source: https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v$WHISPER_VERSION.tar.gz sha256=$WHISPER_SHA256"
+            echo "Options: static, GGML_METAL with embedded library, macOS $MACOS_MIN+"
+            echo "Workflow: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > "$NAME/BUILDINFO.txt"
+          COPYFILE_DISABLE=1 tar --no-xattrs -cJf "$NAME.tar.xz" "$NAME"
+          shasum -a 256 "$NAME.tar.xz" > "$NAME.tar.xz.sha256"
+          echo "NAME=$NAME" >> "$GITHUB_ENV"
+
+      - name: Smoke test (Metal)
+        run: |
+          curl -fsSL -o tiny.bin "$TINY_URL"
+          echo "$TINY_SHA256  tiny.bin" | shasum -a 256 -c -
+          DIR="$RUNNER_TEMP/smoke ශ්‍රී 🎬"; mkdir -p "$DIR"; cp tiny.bin "$SRC/samples/jfk.wav" "$DIR/"
+          "$NAME/whisper-cli" -m "$DIR/tiny.bin" -f "$DIR/jfk.wav" -ojf -of "$DIR/out" -np 2> stderr.txt || { cat stderr.txt; exit 1; }
+          grep -iE "metal|MTL" stderr.txt | head -5 || true
+          python3 -c 'import json,sys; t=" ".join(s["text"] for s in json.load(open(sys.argv[1]))["transcription"]); print("transcript:", t); assert "ask not what your country can do for you" in t' "$DIR/out.json"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: whisper-macos-arm64
+          path: |
+            ${{ env.NAME }}.tar.xz
+            ${{ env.NAME }}.tar.xz.sha256
+
+  release:
+    if: github.event_name == 'workflow_dispatch' && inputs.release
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download build artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir dist
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ inputs.revision }}
+        run: |
+          . ./versions.env
+          TAG="whisper-v$WHISPER_VERSION-$REVISION"
+          gh release create "$TAG" dist/*/* --repo "$GITHUB_REPOSITORY" \
+            --title "whisper.cpp $WHISPER_VERSION (Clipforge build $REVISION)" \
+            --notes "whisper.cpp v$WHISPER_VERSION (MIT). Windows x64: Vulkan + CPU variants, UTF-8 manifest. macOS arm64: static, Metal. Built by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

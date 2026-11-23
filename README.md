@@ -36,6 +36,19 @@ BtbN's LGPL build (with NVENC, AMF, QSV/libvpl, openh264, Kvazaar and SVT-AV1) i
 
 BtbN's LGPL builds use `--enable-version3` (LGPL-3.0-or-later), which is still redistributable. Their build scripts are at <https://github.com/BtbN/FFmpeg-Builds>.
 
+## whisper.cpp (speech-to-text)
+
+Clipforge also bundles [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (MIT) for local transcription. Unlike FFmpeg, it is built in GitHub Actions by [`build-whisper.yml`](.github/workflows/build-whisper.yml), pinned by `WHISPER_VERSION` and `WHISPER_SHA256` in `versions.env`:
+
+| Platform | Build | GPU | Notes |
+| --- | --- | --- | --- |
+| Windows x64 | clang + Ninja, shared libraries | Vulkan (NVIDIA, Intel, AMD), loaded at runtime | Falls back to the CPU when the driver has no Vulkan loader. CPU variants (SSE4.2 to AVX-512) are picked at runtime. A UTF-8 code page manifest makes non-ASCII paths work. |
+| macOS arm64 | static, macOS 13.0+ | Metal, library embedded | One `whisper-cli` binary that links only system libraries |
+
+Each job smoke-tests the result by transcribing the JFK sample from a non-ASCII folder. To publish, run the workflow from the Actions tab with **release** ticked. It creates `whisper-v<version>-<revision>`. Then update `resources/whisper/manifest.json` in Clipforge.
+
+The speech model itself (`ggml-large-v3-turbo-q5_0.bin`, MIT) is not rebuilt here. Clipforge pins it by Hugging Face commit and SHA-256.
+
 ## Releasing
 
 Build on an Apple Silicon Mac, then:
