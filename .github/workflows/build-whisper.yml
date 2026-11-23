@@ -98,25 +98,33 @@ jobs:
           Get-ChildItem $name | Format-Table Name, Length
           "NAME=$name" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Smoke test (CPU fallback; the runner has no GPU)
-        run: |
-          Invoke-WebRequest $env:TINY_URL -OutFile tiny.bin
-          if ((Get-FileHash tiny.bin -Algorithm SHA256).Hash.ToLower() -ne $env:TINY_SHA256) { throw "tiny model SHA-256 mismatch" }
-          # Run from a non-ASCII folder to exercise the UTF-8 manifest.
-          $dir = Join-Path $env:RUNNER_TEMP "smoke ශ්‍රී 🎬"; New-Item -ItemType Directory $dir | Out-Null
-          Copy-Item tiny.bin, "$env:SRC\samples\jfk.wav" $dir
-          & "$env:NAME\whisper-cli.exe" -m "$dir\tiny.bin" -f "$dir\jfk.wav" -ojf -of "$dir\out" -np
-          if ($LASTEXITCODE -ne 0) { throw "whisper-cli exited $LASTEXITCODE" }
-          $text = (Get-Content "$dir\out.json" -Raw -Encoding utf8 | ConvertFrom-Json).transcription.text -join ' '
-          "transcript: $text"
-          if ($text -notmatch 'ask not what your country can do for you') { throw "unexpected transcript" }
-
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: whisper-windows-x64
           path: |
             ${{ env.NAME }}.zip
             ${{ env.NAME }}.zip.sha256
+
+
+      - name: Smoke test (CPU fallback; the runner has no GPU)
+        run: |
+          Invoke-WebRequest $env:TINY_URL -OutFile tiny.bin
+          if ((Get-FileHash tiny.bin -Algorithm SHA256).Hash.ToLower() -ne $env:TINY_SHA256) { throw "tiny model SHA-256 mismatch" }
+          function Test-Transcribe($dir) {
+            New-Item -ItemType Directory -Force $dir | Out-Null
+            Copy-Item tiny.bin, "$env:SRC\samples\jfk.wav" $dir
+            $p = Start-Process -FilePath "$env:NAME\whisper-cli.exe" -NoNewWindow -Wait -PassThru `
+              -RedirectStandardError "$dir\stderr.txt" -RedirectStandardOutput "$dir\stdout.txt" `
+              -ArgumentList @('-m', "`"$dir	iny.bin`"", '-f', "`"$dir\jfk.wav`"", '-ojf', '-of', "`"$dir\out`"")
+            Get-Content "$dir\stderr.txt" -Encoding utf8 | Select-Object -First 40
+            if ($p.ExitCode -ne 0) { throw "whisper-cli exited $($p.ExitCode) in $dir" }
+            $text = (Get-Content "$dir\out.json" -Raw -Encoding utf8 | ConvertFrom-Json).transcription.text -join ' '
+            "transcript: $text"
+            if ($text -notmatch 'ask not what your country can do for you') { throw "unexpected transcript" }
+          }
+          Test-Transcribe (Join-Path $env:RUNNER_TEMP "smoke-ascii")
+          # Non-ASCII folder: exercises the UTF-8 code page manifest.
+          Test-Transcribe (Join-Path $env:RUNNER_TEMP "smoke ශ්‍රී 🎬")
 
   macos:
     runs-on: macos-15
