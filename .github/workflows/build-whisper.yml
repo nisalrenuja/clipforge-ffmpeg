@@ -113,11 +113,10 @@ jobs:
           function Test-Transcribe($dir) {
             New-Item -ItemType Directory -Force $dir | Out-Null
             Copy-Item tiny.bin, "$env:SRC\samples\jfk.wav" $dir
-            $p = Start-Process -FilePath "$env:NAME\whisper-cli.exe" -NoNewWindow -Wait -PassThru `
-              -RedirectStandardError "$dir\stderr.txt" -RedirectStandardOutput "$dir\stdout.txt" `
-              -ArgumentList @('-m', "`"$dir	iny.bin`"", '-f', "`"$dir\jfk.wav`"", '-ojf', '-of', "`"$dir\out`"")
+            & "$env:NAME\whisper-cli.exe" -m "$dir\tiny.bin" -f "$dir\jfk.wav" -ojf -of "$dir\out" 2> "$dir\stderr.txt"
+            $rc = $LASTEXITCODE
             Get-Content "$dir\stderr.txt" -Encoding utf8 | Select-Object -First 40
-            if ($p.ExitCode -ne 0) { throw "whisper-cli exited $($p.ExitCode) in $dir" }
+            if ($rc -ne 0) { throw "whisper-cli exited $rc in $dir" }
             $text = (Get-Content "$dir\out.json" -Raw -Encoding utf8 | ConvertFrom-Json).transcription.text -join ' '
             "transcript: $text"
             if ($text -notmatch 'ask not what your country can do for you') { throw "unexpected transcript" }
