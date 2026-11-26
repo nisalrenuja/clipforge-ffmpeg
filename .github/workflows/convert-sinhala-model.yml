@@ -1,0 +1,136 @@
+# Converts the Sinhala speech model for Clipforge (add-sinhala-speech): SinhaSpeech's fine-tune
+# of Whisper small from Hugging Face format to whisper.cpp ggml, quantised to q5_1 (~190 MB).
+# Every input is pinned in versions.env: the model revision and the SHA-256 of its weights, the
+# whisper.cpp source (converter, quantiser, whisper-cli for the smoke test) and openai/whisper
+# (mel filters). The result is smoke-tested with the pinned whisper-cli.
+# Run it from the Actions tab; tick "release" to publish to whisper-model-small-sinhala-<revision>.
+name: convert-sinhala-model
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Publish the model as a GitHub release
+        type: boolean
+        default: false
+      revision:
+        description: Release revision suffix (whisper-model-small-sinhala-<revision>)
+        default: "1"
+  pull_request:
+    paths: [".github/workflows/convert-sinhala-model.yml", "versions.env"]
+
+permissions:
+  contents: read
+
+jobs:
+  convert:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read pins
+        run: grep -E '^[A-Z0-9_]+=' versions.env >> "$GITHUB_ENV"
+
+      - name: Fetch and verify whisper.cpp source
+        run: |
+          curl -fsSL -o src.tar.gz "https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v$WHISPER_VERSION.tar.gz"
+          echo "$WHISPER_SHA256  src.tar.gz" | sha256sum -c -
+          tar xzf src.tar.gz
+          echo "SRC=$PWD/whisper.cpp-$WHISPER_VERSION" >> "$GITHUB_ENV"
+
+      - name: Build the quantiser and whisper-cli (CPU)
+        run: |
+          cmake -S "$SRC" -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DWHISPER_BUILD_TESTS=OFF \
+            -DWHISPER_BUILD_SERVER=OFF -DWHISPER_SDL2=OFF -DWHISPER_CURL=OFF
+          cmake --build build --target whisper-cli whisper-quantize -j 4
+          ls build/bin
+          echo "QUANTIZE=$PWD/build/bin/whisper-quantize" >> "$GITHUB_ENV"
+
+      - name: Fetch the model at its pinned revision and verify the weights
+        run: |
+          mkdir hf
+          base="https://huggingface.co/$SINHALA_MODEL_REPO/resolve/$SINHALA_MODEL_REV"
+          for f in config.json generation_config.json added_tokens.json merges.txt normalizer.json \
+                   preprocessor_config.json special_tokens_map.json tokenizer_config.json vocab.json \
+                   model.safetensors README.md; do
+            curl -fsSL -o "hf/$f" "$base/$f"
+          done
+          echo "$SINHALA_MODEL_SAFETENSORS_SHA256  hf/model.safetensors" | sha256sum -c -
+
+      - name: Fetch openai/whisper assets (mel filters) at the pinned commit
+        run: |
+          mkdir -p openai-whisper/whisper/assets
+          curl -fsSL -o openai-whisper/whisper/assets/mel_filters.npz \
+            "https://raw.githubusercontent.com/openai/whisper/$OPENAI_WHISPER_COMMIT/whisper/assets/mel_filters.npz"
+
+      - name: Convert to ggml (f16), then quantise to q5_1
+        run: |
+          python3 -m venv venv
+          venv/bin/pip install --quiet --index-url https://download.pytorch.org/whl/cpu torch==2.5.1
+          venv/bin/pip install --quiet transformers==4.46.3 numpy==1.26.4 safetensors==0.4.5
+          mkdir out
+          venv/bin/python "$SRC/models/convert-h5-to-ggml.py" hf openai-whisper out
+          ls -l out
+          "$QUANTIZE" out/ggml-model.bin ggml-small-sinhala-q5_1.bin q5_1
+          ls -l ggml-small-sinhala-q5_1.bin
+
+      - name: Smoke test with the pinned whisper-cli
+        run: |
+          ./build/bin/whisper-cli -m ggml-small-sinhala-q5_1.bin -f "$SRC/samples/jfk.wav" -l si -ojf -of smoke \
+            2> stderr.txt || { cat stderr.txt; exit 1; }
+          grep -E "n_vocab|ftype|type" stderr.txt | head -8
+          python3 - <<'PY'
+          import json
+          text = " ".join(s["text"] for s in json.load(open("smoke.json", encoding="utf-8"))["transcription"]).strip()
+          print("transcript (-l si on the English JFK sample):", text)
+          assert text, "the model produced no text"
+          PY
+
+      - name: Package
+        run: |
+          NAME=whisper-model-small-sinhala
+          mkdir "$NAME"
+          mv ggml-small-sinhala-q5_1.bin "$NAME/"
+          curl -fsSL -o "$NAME/LICENSE-model.txt" https://www.apache.org/licenses/LICENSE-2.0.txt
+          cp hf/README.md "$NAME/MODEL-CARD.md"
+          {
+            echo "Sinhala speech model for Clipforge: ggml q5_1 of $SINHALA_MODEL_REPO (Apache-2.0)"
+            echo "Source: https://huggingface.co/$SINHALA_MODEL_REPO/tree/$SINHALA_MODEL_REV"
+            echo "Weights: model.safetensors sha256=$SINHALA_MODEL_SAFETENSORS_SHA256"
+            echo "Base model: openai/whisper-small (MIT); reported 15.52 % WER / 4.36 % CER (model card)"
+            echo "Converted with whisper.cpp v$WHISPER_VERSION models/convert-h5-to-ggml.py, mel filters from openai/whisper@$OPENAI_WHISPER_COMMIT"
+            echo "Quantised with whisper.cpp v$WHISPER_VERSION quantize to q5_1"
+            echo "Training data: SinhaSpeech/sinhala-asr-data-v6 (no licence published: review before a paid release)"
+            echo "Workflow: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > "$NAME/MODELINFO.txt"
+          ( cd "$NAME" && sha256sum ggml-small-sinhala-q5_1.bin > ggml-small-sinhala-q5_1.bin.sha256 )
+          ls -l "$NAME"
+          cat "$NAME/ggml-small-sinhala-q5_1.bin.sha256"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: whisper-model-small-sinhala
+          path: whisper-model-small-sinhala/*
+
+  release:
+    if: github.event_name == 'workflow_dispatch' && inputs.release
+    needs: [convert]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download the converted model
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir dist
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ inputs.revision }}
+        run: |
+          . ./versions.env
+          TAG="whisper-model-small-sinhala-$REVISION"
+          gh release create "$TAG" dist/*/* --repo "$GITHUB_REPOSITORY" \
+            --title "Sinhala speech model (Clipforge build $REVISION)" \
+            --notes "ggml q5_1 of $SINHALA_MODEL_REPO@$SINHALA_MODEL_REV (Apache-2.0), converted with whisper.cpp v$WHISPER_VERSION. Built by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
