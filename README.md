@@ -65,3 +65,8 @@ Bump the pins deliberately when FFmpeg ships security fixes. FFmpeg parses untru
 
 - Kvazaar has no ARM SIMD, so CPU HEVC on Mac is slow. VideoToolbox is the primary encoder on macOS.
 - The LGPL licence does not settle H.264/HEVC patent licensing for a commercial product. That needs review before any paid Clipforge build.
+
+## Sinhala speech model
+
+`.github/workflows/convert-sinhala-model.yml` converts SinhaSpeech's Sinhala fine-tune of Whisper small (Apache-2.0) to whisper.cpp ggml q5_1 for Clipforge's Sinhala and Sinhala + English projects. The model revision, the SHA-256 of its weights, whisper.cpp and openai/whisper are pinned in `versions.env`. Run it from the Actions tab and tick "release" to publish `whisper-model-small-sinhala-<revision>`; then pin the release asset's SHA-256 in Clipforge's `resources/whisper/manifest.json`. The training data publishes no licence, so it must be reviewed before a paid release.
+
